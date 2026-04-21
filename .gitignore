@@ -225,3 +225,7 @@ test_providers.py
 # Internal analysis artifacts (not learning material)
 analysis/
 analysis_progress.md
+uv.lock
+pyproject.toml
+main.py
+.python-version

@@ -10,6 +10,29 @@ This chapter teaches a two-layer skill model:
 
 That keeps the prompt small while still giving the model access to reusable,
 task-specific guidance.
+
+---
+中文注解：
+
+本章介绍一种两层技能模型：
+
+1. 将轻量的技能目录放入系统提示词中。
+   （只包含技能名称和简短描述，不含完整内容，保持提示词精简）
+2. 仅在模型主动请求时，才加载完整的技能内容。
+   （按需加载，避免一次性塞入大量无关内容）
+
+这样做的好处：在保持提示词体积小的同时，
+仍然让模型能够访问可复用的、针对特定任务的专项指导。
+
+理解：保持系统提示词的干净清爽，避免一下子将本次任务可能用到的所有技能都塞进去，导致提示词过于臃肿。
+因此最理想的做法是先将线索性的信息放入系统提示词中，然后在模型主动请求时，再根据请求加载对应的技能内容。
+这个方式可以避免将技能内容永久性地塞入系统提示词中，从而保持系统提示词的简洁和清晰。
+
+按需加载的方式不仅可以应用到skill中还可以使用到文件系统中，将文件系统的目录线索性的信息放入系统提示词中，
+然后在模型主动请求时，再根据请求加载对应的文件内容。
+
+这里的实现是将skill的目录信息放入系统提示词中，然后在模型主动请求时
+使用工具load_skill来加载对应的skill的正文，其参数是传递skill的名称，skill正文作为工具调用的结果添加到messages中。
 """
 
 import os
@@ -46,7 +69,7 @@ class SkillDocument:
 
 
 class SkillRegistry:
-    def __init__(self, skills_dir: Path):
+    def __init__(self, skills_dir: Path):  # 这里的path是skills目录的path
         self.skills_dir = skills_dir
         self.documents: dict[str, SkillDocument] = {}
         self._load_all()
@@ -55,6 +78,7 @@ class SkillRegistry:
         if not self.skills_dir.exists():
             return
 
+        # 在skill目录下遍历所有SKILL.md文件，并排序
         for path in sorted(self.skills_dir.rglob("SKILL.md")):
             meta, body = self._parse_frontmatter(path.read_text())
             name = meta.get("name", path.parent.name)
@@ -73,7 +97,7 @@ class SkillRegistry:
                 continue
             key, value = line.split(":", 1)
             meta[key.strip()] = value.strip()
-        return meta, match.group(2)
+        return meta, match.group(2)  # meta里面包含的是skill的名称和描述，match.group(2)里面包含的是skill的正文
 
     def describe_available(self) -> str:
         if not self.documents:
@@ -82,10 +106,10 @@ class SkillRegistry:
         for name in sorted(self.documents):
             manifest = self.documents[name].manifest
             lines.append(f"- {manifest.name}: {manifest.description}")
-        return "\n".join(lines)
+        return "\n".join(lines)  # 返回所有可用skill的名称和描述
 
     def load_full_text(self, name: str) -> str:
-        document = self.documents.get(name)
+        document = self.documents.get(name) # 如果没有找到对应的skill，则返回错误信息
         if not document:
             known = ", ".join(sorted(self.documents)) or "(none)"
             return f"Error: Unknown skill '{name}'. Available skills: {known}"
@@ -94,7 +118,7 @@ class SkillRegistry:
             f"<skill name=\"{document.manifest.name}\">\n"
             f"{document.body}\n"
             "</skill>"
-        )
+        ) # 返回对应的skill的正文
 
 
 SKILL_REGISTRY = SkillRegistry(SKILLS_DIR)
@@ -253,6 +277,7 @@ def agent_loop(messages: list) -> None:
             tools=TOOLS,
             max_tokens=8000,
         )
+        # 模型的直接回复
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
@@ -275,7 +300,7 @@ def agent_loop(messages: list) -> None:
                 "tool_use_id": block.id,
                 "content": str(output),
             })
-
+        # 将工具调用的结果添加到messages中
         messages.append({"role": "user", "content": results})
 
 
