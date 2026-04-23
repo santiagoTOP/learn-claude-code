@@ -2,24 +2,34 @@
 # Harness: safety -- the pipeline between intent and execution.
 """
 s07_permission_system.py - Permission System
+【中文】权限系统：在「意图」与「执行」之间插入可编排的安全流水线。
 
 Every tool call passes through a permission pipeline before execution.
+【中文】每次工具调用在执行前都会先走一遍权限流水线，而不是直接执行。
 
 Teaching pipeline:
   1. deny rules
   2. mode check
   3. allow rules
   4. ask user
+【中文】教学用流水线顺序：① 拒绝规则 → ② 模式检查 → ③ 允许规则 → ④ 询问用户。
 
 This version intentionally teaches three modes first:
   - default
   - plan
   - auto
+【中文】本版有意先只讲三种模式，便于循序渐进：default / plan / auto。
 
 That is enough to build a real, understandable permission system without
 burying readers under every advanced policy branch on day one.
+【中文】这样足以搭出真实、可读懂的权限模型，又避免第一天就堆满高级策略分支。
 
 Key insight: "Safety is a pipeline, not a boolean."
+【中文】要点：安全是流水线式的多层判断，而不是单一的「允许/禁止」布尔开关。
+
+理解：
+- 任何工具调用，都不应该直接执行；中间必须先过一条权限管道
+- “意图”不能直接变成“执行”，中间必须经过权限检查
 """
 
 import json
@@ -62,11 +72,11 @@ class BashSecurityValidator:
     """
 
     VALIDATORS = [
-        ("shell_metachar", r"[;&|`$]"),       # shell metacharacters
-        ("sudo", r"\bsudo\b"),                 # privilege escalation
-        ("rm_rf", r"\brm\s+(-[a-zA-Z]*)?r"),  # recursive delete
-        ("cmd_substitution", r"\$\("),          # command substitution
-        ("ifs_injection", r"\bIFS\s*="),        # IFS manipulation
+        ("shell_metachar", r"[;&|`$]"),       # shell metacharacters，shell元字符
+        ("sudo", r"\bsudo\b"),                 # privilege escalation，权限提升
+        ("rm_rf", r"\brm\s+(-[a-zA-Z]*)?r"),  # recursive delete ，递归删除
+        ("cmd_substitution", r"\$\("),          # command substitution，命令替换
+        ("ifs_injection", r"\bIFS\s*="),        # IFS manipulation，IFS注入
     ]
 
     def validate(self, command: str) -> list:
@@ -99,12 +109,14 @@ class BashSecurityValidator:
 def is_workspace_trusted(workspace: Path = None) -> bool:
     """
     Check if a workspace has been explicitly marked as trusted.
+    【中文】判断当前工作区是否已被用户显式标记为「受信任」。
 
     The teaching version uses a simple marker file. A more complete system
     can layer richer trust flows on top of the same idea.
+    【中文】教学版用「是否存在标记文件」这一种简单方式；完整系统可在此思路上叠加更丰富的信任流程。
     """
     ws = workspace or WORKDIR
-    trust_marker = ws / ".claude" / ".claude_trusted"
+    trust_marker = ws / ".claude" / ".claude_trusted" # 标记的受信任工作区
     return trust_marker.exists()
 
 
@@ -141,8 +153,8 @@ class PermissionManager:
         self.rules = rules or list(DEFAULT_RULES)
         # Simple denial tracking helps surface when the agent is repeatedly
         # asking for actions the system will not allow.
-        self.consecutive_denials = 0
-        self.max_consecutive_denials = 3
+        self.consecutive_denials = 0 # 连续拒绝的次数
+        self.max_consecutive_denials = 3 # 最大连续拒绝的次数
 
     def check(self, tool_name: str, tool_input: dict) -> dict:
         """
@@ -155,6 +167,7 @@ class PermissionManager:
             failures = bash_validator.validate(command)
             if failures:
                 # Severe patterns (sudo, rm_rf) get immediate deny
+                # 严重模式（sudo, rm_rf）立即拒绝
                 severe = {"sudo", "rm_rf"}
                 severe_hits = [f for f in failures if f[0] in severe]
                 if severe_hits:
@@ -162,12 +175,14 @@ class PermissionManager:
                     return {"behavior": "deny",
                             "reason": f"Bash validator: {desc}"}
                 # Other patterns escalate to ask (user can still approve)
+                # 其他模式（cmd_substitution, ifs_injection）升级为询问（用户可以仍然批准）
                 desc = bash_validator.describe_failures(command)
                 return {"behavior": "ask",
                         "reason": f"Bash validator flagged: {desc}"}
 
         # Step 1: Deny rules (bypass-immune, checked first always)
         for rule in self.rules:
+            # 如果规则不是拒绝规则，则跳过
             if rule["behavior"] != "deny":
                 continue
             if self._matches(rule, tool_name, tool_input):
@@ -177,6 +192,7 @@ class PermissionManager:
         # Step 2: Mode-based decisions
         if self.mode == "plan":
             # Plan mode: deny all write operations, allow reads
+            # 计划模式：拒绝所有写操作，允许读操作
             if tool_name in WRITE_TOOLS:
                 return {"behavior": "deny",
                         "reason": "Plan mode: write operations are blocked"}
@@ -191,6 +207,7 @@ class PermissionManager:
             pass
 
         # Step 3: Allow rules
+        # 使用default模式的时候，会走这个步骤
         for rule in self.rules:
             if rule["behavior"] != "allow":
                 continue
@@ -205,6 +222,7 @@ class PermissionManager:
 
     def ask_user(self, tool_name: str, tool_input: dict) -> bool:
         """Interactive approval prompt. Returns True if approved."""
+        # 交互式批准提示。返回True如果批准。
         preview = json.dumps(tool_input, ensure_ascii=False)[:200]
         print(f"\n  [Permission] {tool_name}: {preview}")
         try:
@@ -214,6 +232,7 @@ class PermissionManager:
 
         if answer == "always":
             # Add permanent allow rule for this tool
+            # 动态添加允许规则
             self.rules.append({"tool": tool_name, "path": "*", "behavior": "allow"})
             self.consecutive_denials = 0
             return True
@@ -222,6 +241,7 @@ class PermissionManager:
             return True
 
         # Track denials for circuit breaker
+        # 跟踪拒绝次数，用于熔断器
         self.consecutive_denials += 1
         if self.consecutive_denials >= self.max_consecutive_denials:
             print(f"  [{self.consecutive_denials} consecutive denials -- "
@@ -230,6 +250,7 @@ class PermissionManager:
 
     def _matches(self, rule: dict, tool_name: str, tool_input: dict) -> bool:
         """Check if a rule matches the tool call."""
+        # 根据工具名称、工具执行路径以及工具输入内容，判断是否匹配规则
         # Tool name match
         if rule.get("tool") and rule["tool"] != "*":
             if rule["tool"] != tool_name:
@@ -357,7 +378,7 @@ def agent_loop(messages: list, perms: PermissionManager):
                     output = handler(**(block.input or {})) if handler else f"Unknown: {block.name}"
                     print(f"> {block.name}: {str(output)[:200]}")
                 else:
-                    output = f"Permission denied by user for {block.name}"
+                    output = f"Permission denied by user for {block.name}" # 告诉模型，用户拒绝了
                     print(f"  [USER DENIED] {block.name}")
 
             else:  # allow
@@ -395,12 +416,12 @@ if __name__ == "__main__":
 
         # /mode command to switch modes at runtime
         if query.startswith("/mode"):
-            parts = query.split()
+            parts = query.split() # 按照空格切分命令
             if len(parts) == 2 and parts[1] in MODES:
                 perms.mode = parts[1]
                 print(f"[Switched to {parts[1]} mode]")
             else:
-                print(f"Usage: /mode <{'|'.join(MODES)}>")
+                print(f"Usage: /mode <{'|'.join(MODES)}>") # 告诉用户可用的模式
             continue
 
         # /rules command to show current rules

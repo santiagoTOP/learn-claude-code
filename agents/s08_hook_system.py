@@ -21,6 +21,25 @@ teach the extension pattern clearly before introducing event-specific edge
 cases.
 
 Key insight: "Extend the agent without touching the loop."
+
+---
+【中文说明】
+
+Hook（钩子）是围绕主循环的扩展点：在不重写主循环的前提下，让读者注入额外行为。
+
+教学版仅包含三类钩子：
+  - SessionStart：会话开始
+  - PreToolUse：工具调用前
+  - PostToolUse：工具调用后
+
+教学用的进程退出码约定：
+  - 0：继续执行
+  - 1：阻止（阻断）
+  - 2：注入一条消息
+
+本实现刻意比生产系统简单：先讲清楚「扩展主流程」这一模式，再谈各事件上的边界情况。
+
+核心思想：「扩展智能体，而不去动主循环本身。」
 """
 
 import json
@@ -61,6 +80,14 @@ class HookManager:
     - load hook definitions
     - run matching commands for an event
     - aggregate block / message results for the caller
+
+    中文：
+    从 .hooks.json 配置中加载并执行钩子。
+
+    钩子管理器做三件简单的事：
+    - 加载钩子定义（配置项）
+    - 在指定事件发生时运行匹配的命令
+    - 汇总「是否阻断」与「待注入消息」等结果，交给调用方处理
     """
 
     def __init__(self, config_path: Path = None, sdk_mode: bool = False):
@@ -71,6 +98,7 @@ class HookManager:
             try:
                 config = json.loads(config_path.read_text())
                 for event in HOOK_EVENTS:
+                    # 根据配置文件中的event，加载对应的钩子
                     self.hooks[event] = config.get("hooks", {}).get(event, [])
                 print(f"[Hooks loaded from {config_path}]")
             except Exception as e:
@@ -94,7 +122,15 @@ class HookManager:
         Returns: {"blocked": bool, "messages": list[str]}
           - blocked: True if any hook returned exit code 1
           - messages: stderr content from exit-code-2 hooks (to inject)
+
+        中文：
+        按事件依次执行所有已注册的钩子。
+
+        返回：{"blocked": bool, "messages": list[str]}
+          - blocked：若有任一钩子进程退出码为 1，则为 True（表示应阻断后续流程）
+          - messages：退出码为 2 的钩子在其 stderr 上的内容列表（供注入到对话/上下文中）
         """
+
         result = {"blocked": False, "messages": []}
 
         # Trust gate: refuse to run hooks in untrusted workspaces

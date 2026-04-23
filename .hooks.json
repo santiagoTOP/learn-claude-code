@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "command": "echo 'Checking bash command...'"
+      },
+      {
+        "matcher": "bash",
+        "command": "echo 'Auditing bash command' >&2; exit 0"
+      },
+      {
+        "matcher": "write_file",
+        "command": "echo 'Lint check placeholder: replace with real script path' >&2; exit 0"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "command": "echo 'Tool finished'"
+      }
+    ],
+    "SessionStart": [
+      {
+        "command": "echo 'Agent session started'"
+      }
+    ]
+  }
+}
