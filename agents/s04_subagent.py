@@ -41,6 +41,13 @@ isolated tool context -- same pattern as this teaching implementation.
     | Agent definition  | hardcoded system | .claude/agents/*.md with YAML    |
     |                   | prompt           | frontmatter (AgentTemplate)      |
     +-------------------+------------------+----------------------------------+
+
+理解：subagent 的主要功能是减轻主 agent 的上下文负担，让主 agent 可以专注于全局任务。
+subagent 具备独立干净的上下文系统，当主 agent 决定把一个局部任务外包出去时，
+subagent subagent 也可以从 0 开始创建自己的上下文，只有在需要主 agent 的上下文时，subagent 会从主 agent 的上下文系统中复制一份上下文。（fork）
+subagent 只返回最终摘要或结果给主 agent，而不是返回全部内部历史。
+subagent 通常不需要拥有和主 agent 完全一样的能力，只需要具备基础的文件读取、搜索、bash 等工具。
+subagent 的工具集通常是主 agent 的子集，在 subagent 中需要限制 subagent 的循环次数以免 subagent 无限递归。
 """
 
 import os
@@ -67,12 +74,20 @@ SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given t
 class AgentTemplate:
     """
     Parse agent definition from markdown frontmatter.
+    【中文】从 Markdown 文件的 YAML 前置元数据（frontmatter）中解析代理定义。
 
     Real Claude Code loads agent definitions from .claude/agents/*.md.
+    【中文】真实 Claude Code 从 .claude/agents/*.md 等路径加载代理模板。
+
     Frontmatter fields: name, tools, disallowedTools, skills, hooks,
     model, effort, permissionMode, maxTurns, memory, isolation, color,
     background, initialPrompt, mcpServers.
+    【中文】前置里常见字段：name、tools、disallowedTools、skills、hooks、
+    model、effort、permissionMode、maxTurns、memory、isolation、color、
+    background、initialPrompt、mcpServers 等（本教学类的解析器只做了简化子集）。
+
     3 sources: built-in, custom (.claude/agents/), plugin-provided.
+    【中文】定义来源通常有三类：内置、用户目录 .claude/agents/、插件提供。
     """
     def __init__(self, path):
         self.path = Path(path)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Harness: the loop -- keep feeding real tool results back into the model.
 """
-s01_agent_loop.py - The Agent Loop
+s01_agent_loop.py - The Agent Loop / 智能体循环
 
-This file teaches the smallest useful coding-agent pattern:
+EN: This file teaches the smallest useful coding-agent pattern:
 
     user message
       -> model reply
@@ -13,6 +13,52 @@ This file teaches the smallest useful coding-agent pattern:
 
 It intentionally keeps the loop small, but still makes the loop state explicit
 so later chapters can grow from the same structure.
+
+中文：本文件演示最小但仍有实用价值的编程智能体模式：
+
+    用户消息
+      -> 模型回复
+      -> 若使用工具：执行工具
+      -> 将 tool_result 写回消息列表
+      -> 继续循环
+
+有意保持循环精简，同时把循环状态写清楚，以便后续章节在同一套结构上扩展。
+
+model response:
+Message(
+    id='msg_20260402232218805fa24dc98d4fdd', 
+    container=None, 
+    content=[
+        ToolUseBlock(
+            id='call_3e9af27bf53342af9c51b0f2', 
+            caller=None, 
+            input={'command': 'ls -la /Users/tngpng/Documents/code/learn-claude-code/agents'}, 
+            name='bash', 
+            type='tool_use'
+        )
+    ], 
+    model='glm-4.7', 
+    role='assistant', 
+    stop_details=None, s
+    top_reason='tool_use', 
+    stop_sequence=None, 
+    type='message', 
+    usage=Usage(
+        cache_creation=None, 
+        cache_creation_input_tokens=None, 
+        cache_read_input_tokens=128, 
+        inference_geo=None, 
+        input_tokens=60, 
+        output_tokens=27, 
+        server_tool_use=ServerToolUsage(web_fetch_requests=None, web_search_requests=0), 
+        service_tier='standard'
+    )
+)
+
+理解：基本的 agent 循环，主要是通过循环来让模型持续推理和执行工具。
+
+https://platform.claude.com/docs/zh-CN/intro
+https://platform.claude.com/docs/zh-CN/agents-and-tools/tool-use/build-a-tool-using-agent
 """
 
 import os
@@ -67,7 +113,7 @@ class LoopState:
 
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(item in command for item in dangerous):
+    if any(item in command for item in dangerous): # 确保命令的安全性
         return "Error: Dangerous command blocked"
     try:
         result = subprocess.run(
@@ -125,8 +171,8 @@ def run_one_turn(state: LoopState) -> bool:
     )
     state.messages.append({"role": "assistant", "content": response.content})
 
-    if response.stop_reason != "tool_use":
-        state.transition_reason = None
+    if response.stop_reason != "tool_use": 
+        state.transition_reason = None # 记录模型状态转移的原因，由推理变成行动
         return False
 
     results = execute_tool_calls(response.content)
@@ -156,9 +202,10 @@ if __name__ == "__main__":
             break
 
         history.append({"role": "user", "content": query})
-        state = LoopState(messages=history)
+        state = LoopState(messages=history) # messages和history是同一个列表，拥有相同的引用
         agent_loop(state)
-
+        # print("state: ", state)
+        # print("history: ", history)
         final_text = extract_text(history[-1]["content"])
         if final_text:
             print(final_text)
