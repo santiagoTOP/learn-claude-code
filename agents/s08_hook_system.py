@@ -40,6 +40,8 @@ Hook（钩子）是围绕主循环的扩展点：在不重写主循环的前提�
 本实现刻意比生产系统简单：先讲清楚「扩展主流程」这一模式，再谈各事件上的边界情况。
 
 核心思想：「扩展智能体，而不去动主循环本身。」
+
+理解：和 langgraph 中的中间件起到一样的作用，在主流程的每个关键节点上，插入额外的行为。
 """
 
 import json
@@ -137,9 +139,11 @@ class HookManager:
         if not self._check_workspace_trust():
             return result
 
+        # 每个事件下面都可以有多个钩子
         hooks = self.hooks.get(event, [])
 
         for hook_def in hooks:
+            # 检查每个钩子，先匹配工具名称，然后再看是否有命令需要执行
             # Check matcher (tool name filter for PreToolUse/PostToolUse)
             matcher = hook_def.get("matcher")
             if matcher and context:
@@ -154,6 +158,8 @@ class HookManager:
             # Build environment with hook context
             env = dict(os.environ)
             if context:
+                # 这里的context是给被命令执行的脚本使用的
+                # 脚本可以读取这些环境变量，从而知道当前是哪个事件，哪个工具，哪个输入，哪个输出
                 env["HOOK_EVENT"] = event
                 env["HOOK_TOOL_NAME"] = context.get("tool_name", "")
                 env["HOOK_TOOL_INPUT"] = json.dumps(
@@ -169,6 +175,7 @@ class HookManager:
                 )
 
                 if r.returncode == 0:
+                    # 标识hook执行成功
                     # Continue silently
                     if r.stdout.strip():
                         print(f"  [hook:{event}] {r.stdout.strip()[:100]}")
@@ -190,6 +197,7 @@ class HookManager:
 
                 elif r.returncode == 1:
                     # Block execution
+                    # 标识hook执行失败
                     result["blocked"] = True
                     reason = r.stderr.strip() or "Blocked by hook"
                     result["block_reason"] = reason
@@ -197,6 +205,7 @@ class HookManager:
 
                 elif r.returncode == 2:
                     # Inject message
+                    # 标识hook执行成功，并注入消息
                     msg = r.stderr.strip()
                     if msg:
                         result["messages"].append(msg)
