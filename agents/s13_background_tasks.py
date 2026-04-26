@@ -24,6 +24,24 @@ drains a notification queue and hands finished results back to the model.
 
 Background tasks here are runtime execution slots, not the durable task-board
 records introduced in s12.
+
+中文注解：
+
+本章讲解后台任务：把耗时命令放到后台线程执行，让主 agent loop
+可以继续处理其它工作。每次调用 LLM 之前，主循环都会清空通知队列，
+把已经完成的后台任务结果注入回模型上下文。
+
+主线程负责运行 agent loop；后台线程负责执行耗时任务。
+后台任务完成后，不会直接打断主循环，而是把结果放入 notification queue。
+主循环在下一次调用模型前读取这个队列，再把结果交给模型继续推理。
+
+时间线含义：
+Agent 可以先启动后台任务 A，再启动后台任务 B，然后继续做其它工作。
+A 和 B 在后台并行执行；它们完成后，结果会通过通知队列统一注入回来。
+
+注意：
+这里的 background task 是运行时执行槽位，只表示“某个命令正在后台跑”。
+它不是 s12 中的持久化任务记录；s12 的 task-board record 是写在磁盘上的工作项。
 """
 
 import os
@@ -43,22 +61,25 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-RUNTIME_DIR = WORKDIR / ".runtime-tasks"
+RUNTIME_DIR = WORKDIR / ".runtime-tasks" # 运行时任务目录，默认是当前工作目录下的 .runtime-tasks 目录。
 RUNTIME_DIR.mkdir(exist_ok=True)
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use background_run for long-running commands."
 
-STALL_THRESHOLD_S = 45  # seconds before a task is considered stalled
+STALL_THRESHOLD_S = 45  # seconds before a task is considered stalled # 后台任务运行多久还没结束，就认为它可能停滞
 
 
 class NotificationQueue:
     """
     Priority-based notification queue with same-key folding.
-
     Folding means a newer message can replace an older message with the
     same key, so the context is not flooded with stale updates.
+
+    基于优先级的通知队列，支持相同 key 的折叠。
+    折叠的意思是：如果新消息和旧消息拥有相同的 key，
+    新消息可以替换旧消息，这样上下文就不会被过期更新刷屏。
     """
 
     PRIORITIES = {"immediate": 0, "high": 1, "medium": 2, "low": 3}
@@ -87,46 +108,47 @@ class NotificationQueue:
 # -- BackgroundManager: threaded execution + notification queue --
 class BackgroundManager:
     def __init__(self):
-        self.dir = RUNTIME_DIR
-        self.tasks = {}  # task_id -> {status, result, command, started_at}
-        self._notification_queue = []  # completed task results
-        self._lock = threading.Lock()
+        self.dir = RUNTIME_DIR # 后台任务的工作目录，默认是当前工作目录下的 .runtime-tasks 目录。
+        self.tasks = {}  # task_id -> {status, result, command, started_at} # 后台任务列表，task_id 到任务信息的映射。
+        self._notification_queue = []  # completed task results # 通知队列，completed task results 表示已经完成的后台任务结果。
+        self._lock = threading.Lock() # 锁，用于保护任务列表和通知队列的并发访问。
 
     def _record_path(self, task_id: str) -> Path:
-        return self.dir / f"{task_id}.json"
+        return self.dir / f"{task_id}.json" # 任务记录文件路径，默认是当前工作目录下的 .runtime-tasks 目录下的 task_id.json 文件。
 
     def _output_path(self, task_id: str) -> Path:
-        return self.dir / f"{task_id}.log"
+        return self.dir / f"{task_id}.log" # 任务输出文件路径，默认是当前工作目录下的 .runtime-tasks 目录下的 task_id.log 文件。
 
     def _persist_task(self, task_id: str):
         record = dict(self.tasks[task_id])
+        # 覆盖之前的任务状态信息
         self._record_path(task_id).write_text(
             json.dumps(record, indent=2, ensure_ascii=False)
-        )
+        ) # 持久化任务，将任务信息写入任务记录文件。
 
     def _preview(self, output: str, limit: int = 500) -> str:
         compact = " ".join((output or "(no output)").split())
-        return compact[:limit]
+        return compact[:limit] # 生成任务输出的简短摘要。
 
     def run(self, command: str) -> str:
-        """Start a background thread, return task_id immediately."""
+        """Start a background thread, return task_id immediately.""" # 启动一个后台线程，立即返回任务 ID。
         task_id = str(uuid.uuid4())[:8]
         output_file = self._output_path(task_id)
-        self.tasks[task_id] = {
+        self.tasks[task_id] = { # 添加任务到任务列表。
             "id": task_id,
             "status": "running",
             "result": None,
             "command": command,
             "started_at": time.time(),
             "finished_at": None,
-            "result_preview": "",
-            "output_file": str(output_file.relative_to(WORKDIR)),
+            "result_preview": "", # 任务输出的简短摘要。
+            "output_file": str(output_file.relative_to(WORKDIR)), # 任务输出文件路径。
         }
-        self._persist_task(task_id)
+        self._persist_task(task_id) # 持久化任务状态
         thread = threading.Thread(
-            target=self._execute, args=(task_id, command), daemon=True
+            target=self._execute, args=(task_id, command), daemon=True # 启动一个后台线程，执行任务。daemon=True 表示这是一个守护线程，当主线程退出时，这个线程也会退出。
         )
-        thread.start()
+        thread.start() # 启动后台线程。
         return (
             f"Background task {task_id} started: {command[:80]} "
             f"(output_file={output_file.relative_to(WORKDIR)})"
@@ -148,14 +170,14 @@ class BackgroundManager:
             output = f"Error: {e}"
             status = "error"
         final_output = output or "(no output)"
-        preview = self._preview(final_output)
+        preview = self._preview(final_output) # 生成任务输出的简短摘要。
         output_path = self._output_path(task_id)
-        output_path.write_text(final_output)
+        output_path.write_text(final_output) # 将任务输出写入任务输出文件。
         self.tasks[task_id]["status"] = status
         self.tasks[task_id]["result"] = final_output
         self.tasks[task_id]["finished_at"] = time.time()
         self.tasks[task_id]["result_preview"] = preview
-        self._persist_task(task_id)
+        self._persist_task(task_id) # 持久化任务状态
         with self._lock:
             self._notification_queue.append({
                 "task_id": task_id,
@@ -163,7 +185,7 @@ class BackgroundManager:
                 "command": command[:80],
                 "preview": preview,
                 "output_file": str(output_path.relative_to(WORKDIR)),
-            })
+            }) # 将任务结果添加到通知队列。
 
     def check(self, task_id: str = None) -> str:
         """Check status of one task or list all."""
@@ -177,36 +199,37 @@ class BackgroundManager:
                 "command": t["command"],
                 "result_preview": t.get("result_preview", ""),
                 "output_file": t.get("output_file", ""),
-            }
+            } # 返回任务信息。
             return json.dumps(visible, indent=2, ensure_ascii=False)
         lines = []
         for tid, t in self.tasks.items():
             lines.append(
                 f"{tid}: [{t['status']}] {t['command'][:60]} "
-                f"-> {t.get('result_preview') or '(running)'}"
+                f"-> {t.get('result_preview') or '(running)'}" # 返回任务信息，只有执行完了，才会有 result_preview。
             )
-        return "\n".join(lines) if lines else "No background tasks."
+        return "\n".join(lines) if lines else "No background tasks." # 返回所有任务信息。
 
     def drain_notifications(self) -> list:
         """Return and clear all pending completion notifications."""
-        with self._lock:
+        with self._lock: # 获取锁，防止并发访问通知队列。
             notifs = list(self._notification_queue)
             self._notification_queue.clear()
-        return notifs
+        return notifs # 返回通知队列。
 
     def detect_stalled(self) -> list[str]:
         """
         Return task IDs that have been running longer than STALL_THRESHOLD_S.
+        检测停滞任务，返回运行时间超过 STALL_THRESHOLD_S 的任务 ID 列表。
         """
-        now = time.time()
-        stalled = []
-        for task_id, info in self.tasks.items():
-            if info["status"] != "running":
+        now = time.time() # 当前时间。
+        stalled = [] # 停滞任务 ID 列表。
+        for task_id, info in self.tasks.items(): # 遍历所有任务。
+            if info["status"] != "running": # 如果任务不是运行状态，则跳过。
                 continue
-            elapsed = now - info.get("started_at", now)
-            if elapsed > STALL_THRESHOLD_S:
-                stalled.append(task_id)
-        return stalled
+            elapsed = now - info.get("started_at", now) # 计算任务运行时间。
+            if elapsed > STALL_THRESHOLD_S: # 如果任务运行时间超过 STALL_THRESHOLD_S，则认为它可能停滞。
+                stalled.append(task_id) # 将任务 ID 添加到停滞任务 ID 列表。
+        return stalled # 返回停滞任务 ID 列表。
 
 
 BG = BackgroundManager()
@@ -266,8 +289,8 @@ TOOL_HANDLERS = {
     "read_file":        lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file":       lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":        lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "background_run":   lambda **kw: BG.run(kw["command"]),
-    "check_background": lambda **kw: BG.check(kw.get("task_id")),
+    "background_run":   lambda **kw: BG.run(kw["command"]), # 启动一个后台线程，执行任务。
+    "check_background": lambda **kw: BG.check(kw.get("task_id")), # 检查后台任务状态。
 }
 
 TOOLS = [
@@ -279,6 +302,7 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    # 新增后台任务相关的工具
     {"name": "background_run", "description": "Run command in background thread. Returns task_id immediately.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"name": "check_background", "description": "Check background task status. Omit task_id to list all.",
@@ -290,7 +314,7 @@ def agent_loop(messages: list):
     while True:
         # Drain background notifications and inject as a synthetic user/assistant
         # transcript pair before the next model call (teaching demo behavior).
-        notifs = BG.drain_notifications()
+        notifs = BG.drain_notifications() # 清空通知队列，并返回已经完成的后台任务结果。
         if notifs and messages:
             notif_text = "\n".join(
                 f"[bg:{n['task_id']}] {n['status']}: {n['preview']} "

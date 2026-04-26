@@ -3,11 +3,19 @@
 """
 s12_task_system.py - Tasks
 
+本章讲解持久化任务系统：把任务写入磁盘，让任务状态不依赖当前对话上下文。
+
 Tasks persist as JSON files in .tasks/ so they survive context compression.
 Each task carries a small dependency graph:
 
+任务会以 JSON 文件形式保存在 .tasks/ 目录中，因此即使对话被压缩，
+任务状态也不会丢失。每个任务都带有一个小型依赖图：
+
 - blockedBy: what must finish first
 - blocks: what this task unlocks later
+
+- blockedBy：当前任务开始前必须先完成的任务
+- blocks：当前任务完成后会解锁的后续任务
 
     .tasks/
       task_1.json  {"id":1, "subject":"...", "status":"completed", ...}
@@ -15,29 +23,50 @@ Each task carries a small dependency graph:
       task_3.json  {"id":3, "blockedBy":[2], "blocks":[], ...}
 
     Dependency resolution:
+    依赖解析：
     +----------+     +----------+     +----------+
     | task 1   | --> | task 2   | --> | task 3   |
     | complete |     | blocked  |     | blocked  |
     +----------+     +----------+     +----------+
          |                ^
          +--- completing task 1 removes it from task 2's blockedBy
+         +--- 完成 task 1 后，会把它从 task 2 的 blockedBy 中移除
 
 Key idea: task state survives compression because it lives on disk, not only
 inside the conversation.
 These are durable work-graph tasks, not transient runtime execution slots.
+
+核心思想：任务状态能跨越上下文压缩，是因为它保存在磁盘上，
+而不只是保存在当前对话里。
+这些任务是持久化的工作图节点，不是临时线程、后台槽位或 worker 进程。
 
 Read this file in this order:
 1. TaskManager: what a TaskRecord looks like on disk.
 2. TOOL_HANDLERS / TOOLS: how task operations enter the same loop as normal tools.
 3. agent_loop: how persistent work state is exposed back to the model.
 
+建议按这个顺序阅读：
+1. TaskManager：理解 TaskRecord 在磁盘上的结构。
+2. TOOL_HANDLERS / TOOLS：理解任务操作如何进入普通工具调用的同一循环。
+3. agent_loop：理解持久化工作状态如何暴露回模型。
+
 Most common confusion:
 - a task record is a durable work item
 - it is not a thread, background slot, or worker process
 
+最常见的混淆：
+- task record 是一个持久化工作项
+- 它不是线程、后台槽位，也不是 worker 进程
+
 Teaching boundary:
 this chapter teaches the durable work graph first.
 Runtime execution slots and schedulers arrive later.
+
+教学边界：
+本章先讲持久化工作图。
+运行时执行槽位和调度器会在后续章节出现。
+
+理解：通过工具接口暴露任务管理功能，让模型可以创建、更新、列出和获取任务。
 """
 
 import json
@@ -56,7 +85,7 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-TASKS_DIR = WORKDIR / ".tasks"
+TASKS_DIR = WORKDIR / ".tasks" # 任务目录，默认是当前工作目录下的 .tasks 目录。
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
 
@@ -69,23 +98,29 @@ class TaskManager:
     """
 
     def __init__(self, tasks_dir: Path):
-        self.dir = tasks_dir
+        self.dir = tasks_dir # 任务目录，默认是当前工作目录下的 .tasks 目录。
         self.dir.mkdir(exist_ok=True)
-        self._next_id = self._max_id() + 1
+        self._next_id = self._max_id() + 1 # 下一个任务 ID, 初始化的时候为 1
 
     def _max_id(self) -> int:
-        ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")]
-        return max(ids) if ids else 0
+        """
+        .tasks/
+            task_1.json
+            task_2.json
+            task_3.json
+        """
+        ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")] # [1, 2, 3]
+        return max(ids) if ids else 0 # 返回最大的任务 ID。
 
     def _load(self, task_id: int) -> dict:
         path = self.dir / f"task_{task_id}.json"
         if not path.exists():
             raise ValueError(f"Task {task_id} not found")
-        return json.loads(path.read_text())
+        return json.loads(path.read_text()) # 读取任务
 
     def _save(self, task: dict):
         path = self.dir / f"task_{task['id']}.json"
-        path.write_text(json.dumps(task, indent=2))
+        path.write_text(json.dumps(task, indent=2)) # 保存任务
 
     def create(self, subject: str, description: str = "") -> str:
         task = {
@@ -94,48 +129,51 @@ class TaskManager:
         }
         self._save(task)
         self._next_id += 1
-        return json.dumps(task, indent=2)
+        return json.dumps(task, indent=2) # 创建任务
 
     def get(self, task_id: int) -> str:
-        return json.dumps(self._load(task_id), indent=2)
+        return json.dumps(self._load(task_id), indent=2) # 获取任务
 
     def update(self, task_id: int, status: str = None, owner: str = None,
                add_blocked_by: list = None, add_blocks: list = None) -> str:
-        task = self._load(task_id)
+        task = self._load(task_id) # 加载任务
         if owner is not None:
-            task["owner"] = owner
-        if status:
+            task["owner"] = owner # 设置任务所有者，指定是哪个 agent 执行
+        if status: # 更新任务状态
             if status not in ("pending", "in_progress", "completed", "deleted"):
-                raise ValueError(f"Invalid status: {status}")
-            task["status"] = status
-            # When a task is completed, remove it from all other tasks' blockedBy
+                raise ValueError(f"Invalid status: {status}") # 无效状态
+            task["status"] = status # 更新任务状态
+            # When a task is completed, remove it from all other tasks' blockedBy # 当任务完成时，从所有其他任务的 blockedBy 列表中移除
             if status == "completed":
-                self._clear_dependency(task_id)
-        if add_blocked_by:
-            task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
-        if add_blocks:
-            task["blocks"] = list(set(task["blocks"] + add_blocks))
+                self._clear_dependency(task_id) # 清除依赖
+        if add_blocked_by: # 给当前任务添加依赖
+            task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by)) # 添加依赖
+        if add_blocks: # 当前任务是哪些其他任务的依赖
+            task["blocks"] = list(set(task["blocks"] + add_blocks)) # 添加依赖
             # Bidirectional: also update the blocked tasks' blockedBy lists
-            for blocked_id in add_blocks:
+            for blocked_id in add_blocks: # 遍历添加的依赖
                 try:
-                    blocked = self._load(blocked_id)
-                    if task_id not in blocked["blockedBy"]:
-                        blocked["blockedBy"].append(task_id)
-                        self._save(blocked)
+                    blocked = self._load(blocked_id) # 加载依赖任务
+                    if task_id not in blocked["blockedBy"]: # 如果当前任务 ID 不在依赖任务的 blockedBy 列表中
+                        blocked["blockedBy"].append(task_id) # 添加当前任务 ID
+                        self._save(blocked) # 保存依赖任务
                 except ValueError:
                     pass
-        self._save(task)
-        return json.dumps(task, indent=2)
+        self._save(task) # 保存任务 
+        return json.dumps(task, indent=2) # 返回任务
 
     def _clear_dependency(self, completed_id: int):
-        """Remove completed_id from all other tasks' blockedBy lists."""
-        for f in self.dir.glob("task_*.json"):
-            task = json.loads(f.read_text())
-            if completed_id in task.get("blockedBy", []):
-                task["blockedBy"].remove(completed_id)
-                self._save(task)
+        """Remove completed_id from all other tasks' blockedBy lists.
+        解除受当前任务影响的其他任务的依赖。
+        """
+        for f in self.dir.glob("task_*.json"): # 遍历当前任务目录下的所有任务文件
+            task = json.loads(f.read_text()) # 加载任务
+            if completed_id in task.get("blockedBy", []): # 如果完成任务 ID 在其他任务的 blockedBy 列表中
+                task["blockedBy"].remove(completed_id) # 移除完成任务 ID 
+                self._save(task) # 保存任务
 
     def list_all(self) -> str:
+        # 列出所有任务，并返回任务列表。
         tasks = []
         for f in sorted(self.dir.glob("task_*.json")):
             tasks.append(json.loads(f.read_text()))
@@ -207,6 +245,7 @@ TOOL_HANDLERS = {
     "read_file":   lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file":  lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":   lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+    # 新增任务相关的工具
     "task_create": lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),
     "task_update": lambda **kw: TASKS.update(kw["task_id"], kw.get("status"), kw.get("owner"), kw.get("addBlockedBy"), kw.get("addBlocks")),
     "task_list":   lambda **kw: TASKS.list_all(),

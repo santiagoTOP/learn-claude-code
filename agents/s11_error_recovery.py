@@ -2,42 +2,72 @@
 # Harness: resilience -- a robust agent recovers instead of crashing.
 """
 s11_error_recovery.py - Error Recovery
+中文注解：错误恢复示例。
 
 Teaching demo of three recovery paths:
+中文注解：演示三种常见的恢复路径：
 
 - continue when output is truncated
+  中文注解：当输出被截断时，继续请求剩余内容。
 - compact when context grows too large
+  中文注解：当上下文过大时，先压缩上下文再重试。
 - back off when transport errors are temporary
+  中文注解：当传输错误是临时问题时，退避等待后重试。
 
     LLM response
+    中文注解：LLM 返回响应。
          |
          v
     [Check stop_reason]
+    中文注解：检查停止原因。
          |
          +-- "max_tokens" ----> [Strategy 1: max_output_tokens recovery]
+         |                       中文注解：策略 1，处理输出 token 达到上限的情况。
          |                       Inject continuation message:
+         |                       中文注解：注入一条继续生成的消息：
          |                       "Output limit hit. Continue directly."
+         |                       中文注解：“输出达到限制，请直接继续。”
          |                       Retry up to MAX_RECOVERY_ATTEMPTS (3).
+         |                       中文注解：最多重试 MAX_RECOVERY_ATTEMPTS 次，这里是 3 次。
          |                       Counter: max_output_recovery_count
+         |                       中文注解：使用 max_output_recovery_count 记录恢复次数。
          |
          +-- API error -------> [Check error type]
+         |                       中文注解：如果发生 API 错误，先检查错误类型。
          |                       |
          |                       +-- prompt_too_long --> [Strategy 2: compact + retry]
+         |                       |   中文注解：策略 2，提示词过长时压缩上下文并重试。
          |                       |   Trigger auto_compact (LLM summary).
+         |                       |   中文注解：触发自动压缩，让 LLM 生成摘要。
          |                       |   Replace history with summary.
+         |                       |   中文注解：用摘要替换原始对话历史。
          |                       |   Retry the turn.
+         |                       |   中文注解：重试当前这一轮请求。
          |                       |
          |                       +-- connection/rate --> [Strategy 3: backoff retry]
+         |                           中文注解：策略 3，连接错误或限流时进行退避重试。
          |                           Exponential backoff: base * 2^attempt + jitter
+         |                           中文注解：指数退避公式：基础等待时间 * 2^重试次数 + 随机抖动。
          |                           Up to 3 retries.
+         |                           中文注解：最多重试 3 次。
          |
          +-- "end_turn" -----> [Normal exit]
+                                 中文注解：如果正常结束，则直接退出恢复流程。
 
     Recovery priority (first match wins):
+    中文注解：恢复优先级如下，先匹配到的策略优先生效：
     1. max_tokens -> inject continuation, retry
+       中文注解：输出达到上限时，注入继续消息并重试。
     2. prompt_too_long -> compact, retry
+       中文注解：提示词过长时，压缩上下文并重试。
     3. connection error -> backoff, retry
+       中文注解：连接错误时，退避等待后重试。
     4. all retries exhausted -> fail gracefully
+       中文注解：所有重试耗尽后，优雅失败。
+
+理解：错误恢复的核心是针对模型请求的接口可能存在的各种错误情况，进行恢复。
+- 包括网络抖动、上下文超出、模型输出截断，针对每种错误情况，都有对应的恢复路径。
+- 每个类型的错误都有限定的重试预算，超过预算后，则返回错误。
 """
 
 import json
@@ -60,59 +90,60 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
 # Recovery constants
-MAX_RECOVERY_ATTEMPTS = 3
-BACKOFF_BASE_DELAY = 1.0  # seconds
-BACKOFF_MAX_DELAY = 30.0  # seconds
-TOKEN_THRESHOLD = 50000   # chars / 4 ~ tokens for compact trigger
+MAX_RECOVERY_ATTEMPTS = 3  # 最大重试次数
+BACKOFF_BASE_DELAY = 1.0  # seconds，基础等待时间
+BACKOFF_MAX_DELAY = 30.0  # seconds，最大等待时间
+TOKEN_THRESHOLD = 50000   # chars / 4 ~ tokens for compact trigger，压缩触发阈值
 
 CONTINUATION_MESSAGE = (
-    "Output limit hit. Continue directly from where you stopped -- "
-    "no recap, no repetition. Pick up mid-sentence if needed."
+    "Output limit hit. Continue directly from where you stopped -- " # 输出达到限制，请直接继续。
+    "no recap, no repetition. Pick up mid-sentence if needed." # 不要重新总结，不要重复，如果需要，从中断点接着写。
 )
 
 
 def estimate_tokens(messages: list) -> int:
     """Rough token estimate: ~4 chars per token."""
-    return len(json.dumps(messages, default=str)) // 4
+    return len(json.dumps(messages, default=str)) // 4 # 估算消息的 token 数量
 
 
 def auto_compact(messages: list) -> list:
     """
     Compress conversation history into a short continuation summary.
+    中文注解：将对话历史压缩成一段简短的继续总结。
     """
-    conversation_text = json.dumps(messages, default=str)[:80000]
+    conversation_text = json.dumps(messages, default=str)[:80000] # 限制 80000 是为了防止出现超长上下文导致错误。
     prompt = (
-        "Summarize this conversation for continuity. Include:\n"
-        "1) Task overview and success criteria\n"
-        "2) Current state: completed work, files touched\n"
-        "3) Key decisions and failed approaches\n"
-        "4) Remaining next steps\n"
-        "Be concise but preserve critical details.\n\n"
-        + conversation_text
+        "Summarize this conversation for continuity. Include:\n" # 总结对话历史，保持连续性。
+        "1) Task overview and success criteria\n" # 任务概览和成功标准。
+        "2) Current state: completed work, files touched\n" # 当前状态：已完成工作， touched 文件。
+        "3) Key decisions and failed approaches\n" # 关键决策和失败方法。
+        "4) Remaining next steps\n" # 剩余下一步。
+        "Be concise but preserve critical details.\n\n" # 保持简洁，但保留关键细节。
+        + conversation_text # 对话历史。
     )
     try:
         response = client.messages.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4000,
+            max_tokens=4000, # 最多生成 4000 个 token。
         )
         summary = response.content[0].text
     except Exception as e:
-        summary = f"(compact failed: {e}). Previous context lost."
+        summary = f"(compact failed: {e}). Previous context lost."  # 压缩失败，丢失之前的上下文。
 
     continuation = (
-        "This session continues from a previous conversation that was compacted. "
-        f"Summary of prior context:\n\n{summary}\n\n"
-        "Continue from where we left off without re-asking the user."
+        "This session continues from a previous conversation that was compacted. " # 本次会话从之前被压缩的对话继续。
+        f"Summary of prior context:\n\n{summary}\n\n" # 之前对话的总结。
+        "Continue from where we left off without re-asking the user." # 从之前中断的地方继续，不要重复询问用户。
     )
-    return [{"role": "user", "content": continuation}]
+    return [{"role": "user", "content": continuation}] # 返回压缩后的对话历史。
 
 
 def backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter: base * 2^attempt + random(0, 1)."""
-    delay = min(BACKOFF_BASE_DELAY * (2 ** attempt), BACKOFF_MAX_DELAY)
-    jitter = random.uniform(0, 1)
-    return delay + jitter
+    delay = min(BACKOFF_BASE_DELAY * (2 ** attempt), BACKOFF_MAX_DELAY) # 指数退避公式：基础等待时间 * 2^重试次数 + 随机抖动。
+    jitter = random.uniform(0, 1) # 随机抖动的含义是：避免所有请求同时到达，导致服务器压力过大。
+    return delay + jitter # 返回退避时间。
 
 
 # -- Tool implementations --
@@ -195,9 +226,9 @@ def agent_loop(messages: list):
 
     1. continue after max_tokens
     2. compact after prompt-too-long
-    3. back off after transient transport failure
+    3. back off after transient transport failure # 临时传输错误时，退避等待后重试。
     """
-    max_output_recovery_count = 0
+    max_output_recovery_count = 0 # 输出恢复次数。
 
     while True:
         # -- Attempt the API call with connection retry --
@@ -250,7 +281,7 @@ def agent_loop(messages: list):
         messages.append({"role": "assistant", "content": response.content})
 
         # -- Strategy 1: max_tokens recovery --
-        if response.stop_reason == "max_tokens":
+        if response.stop_reason == "max_tokens":  # 有回复但是回复不完整，需要继续请求剩余内容。
             max_output_recovery_count += 1
             if max_output_recovery_count <= MAX_RECOVERY_ATTEMPTS:
                 print(f"[Recovery] max_tokens hit "

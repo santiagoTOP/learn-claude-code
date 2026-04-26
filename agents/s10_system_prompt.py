@@ -2,10 +2,13 @@
 # Harness: assembly -- the system prompt is a pipeline, not a string.
 """
 s10_system_prompt.py - System Prompt Construction
+# 中文：s10_system_prompt.py —— 系统提示词（System Prompt）的组装
 
 This chapter teaches one core idea:
 the system prompt should be assembled from clear sections, not written as one
 giant hardcoded blob.
+# 中文：本章核心观点：系统提示词应由若干清晰区块拼装而成，
+# 中文：而不是写成一整块巨型硬编码字符串。
 
 Teaching pipeline:
   1. core instructions
@@ -14,15 +17,31 @@ Teaching pipeline:
   4. memory section
   5. CLAUDE.md chain
   6. dynamic context
+# 中文：教学用流水线（组装顺序）：
+# 中文：  1. 核心指令
+# 中文：  2. 工具列表
+# 中文：  3. Skill 元数据
+# 中文：  4. 记忆区块
+# 中文：  5. CLAUDE.md 链式读取
+# 中文：  6. 动态上下文
 
 The builder keeps stable information separate from information that changes
 often. A simple DYNAMIC_BOUNDARY marker makes that split visible.
+# 中文：组装器把相对稳定的信息与经常变化的信息分开；
+# 中文：用简单的 DYNAMIC_BOUNDARY 标记让这种分界在文本中可见。
 
 Per-turn reminders are even more dynamic. They are better injected as a
 separate user-role system reminder than mixed blindly into the stable prompt.
+# 中文：每轮提醒更加动态，更适合以单独的 user 角色“系统提醒”注入，
+# 中文：而不是盲目混进稳定的系统提示词里。
 
 Key insight: "Prompt construction is a pipeline with boundaries, not one
 big string."
+# 中文：关键洞察：“提示词构建是带边界的流水线，而不是一大段字符串。”
+
+理解：系统提示词应该由若干清晰区块拼装而成，而不是写成一整块巨型硬编码字符串，分块写有利于维护和测试
+系统提醒：只在当前轮或当前阶段临时追加的一小段系统信息，不应该永久性地塞进系统提示词中，而是应该在每次会话时重新构建系统提示词。
+
 """
 
 import datetime
@@ -59,13 +78,14 @@ class SystemPromptBuilder:
     """
 
     def __init__(self, workdir: Path = None, tools: list = None):
-        self.workdir = workdir or WORKDIR
-        self.tools = tools or []
-        self.skills_dir = self.workdir / "skills"
-        self.memory_dir = self.workdir / ".memory"
+        self.workdir = workdir or WORKDIR # 工作目录，默认是当前目录
+        self.tools = tools or [] # 工具列表，默认是空列表
+        self.skills_dir = self.workdir / "skills" # 技能目录，默认是工作目录下的 skills 目录
+        self.memory_dir = self.workdir / ".memory" # 记忆目录，默认是工作目录下的 .memory 目录
 
     # -- Section 1: Core instructions --
     def _build_core(self) -> str:
+        # 核心指令、agent 的身份信息
         return (
             f"You are a coding agent operating in {self.workdir}.\n"
             "Use the provided tools to explore, read, write, and edit files.\n"
@@ -74,13 +94,14 @@ class SystemPromptBuilder:
 
     # -- Section 2: Tool listings --
     def _build_tool_listing(self) -> str:
+        # 工具列表
         if not self.tools:
             return ""
         lines = ["# Available tools"]
-        for tool in self.tools:
-            props = tool.get("input_schema", {}).get("properties", {})
-            params = ", ".join(props.keys())
-            lines.append(f"- {tool['name']}({params}): {tool['description']}")
+        for tool in self.tools: # 遍历工具列表
+            props = tool.get("input_schema", {}).get("properties", {}) # 获取工具的输入参数
+            params = ", ".join(props.keys()) # 将输入参数拼接成字符串
+            lines.append(f"- {tool['name']}({params}): {tool['description']}") # 将工具名称和输入参数拼接成字符串
         return "\n".join(lines)
 
     # -- Section 3: Skill metadata (layer 1 from s05 concept) --
@@ -89,10 +110,10 @@ class SystemPromptBuilder:
             return ""
         skills = []
         for skill_dir in sorted(self.skills_dir.iterdir()):
-            skill_md = skill_dir / "SKILL.md"
+            skill_md = skill_dir / "SKILL.md" # 技能文件，默认是技能目录下的 SKILL.md 文件
             if not skill_md.exists():
                 continue
-            text = skill_md.read_text()
+            text = skill_md.read_text() # 读取技能文件内容
             # Parse frontmatter for name + description
             match = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
             if not match:
@@ -142,44 +163,50 @@ class SystemPromptBuilder:
         1. ~/.claude/CLAUDE.md (user-global instructions)
         2. <project-root>/CLAUDE.md (project instructions)
         3. <current-subdir>/CLAUDE.md (directory-specific instructions)
+        第 1 条：~/.claude/CLAUDE.md —— 你机器上的用户全局说明（对所有项目都可能生效）。
+        第 2 条：项目根目录下的 CLAUDE.md —— 本项目的说明。
+        第 3 条：当前工作子目录下的 CLAUDE.md —— 更细粒度、针对某个目录的说明。
         """
         sources = []
 
         # User-global
         user_claude = Path.home() / ".claude" / "CLAUDE.md"
         if user_claude.exists():
+            # 全局 CLAUDE.md 文件
             sources.append(("user global (~/.claude/CLAUDE.md)", user_claude.read_text()))
 
         # Project root
         project_claude = self.workdir / "CLAUDE.md"
         if project_claude.exists():
+            # 项目级 CLAUDE.md 文件
             sources.append(("project root (CLAUDE.md)", project_claude.read_text()))
 
         # Subdirectory -- in real CC, this walks from cwd up to project root
         # Teaching: check cwd if different from workdir
         cwd = Path.cwd()
         if cwd != self.workdir:
-            subdir_claude = cwd / "CLAUDE.md"
+            subdir_claude = cwd / "CLAUDE.md" # 当前工作子目录下的 CLAUDE.md 文件
             if subdir_claude.exists():
                 sources.append((f"subdir ({cwd.name}/CLAUDE.md)", subdir_claude.read_text()))
 
         if not sources:
             return ""
-        parts = ["# CLAUDE.md instructions"]
+        parts = ["# CLAUDE.md instructions"] # CLAUDE.md 指令
         for label, content in sources:
             parts.append(f"## From {label}")
             parts.append(content.strip())
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) # 将 CLAUDE.md 指令拼接成字符串
 
     # -- Section 6: Dynamic context --
     def _build_dynamic_context(self) -> str:
+        # 动态上下文
         lines = [
             f"Current date: {datetime.date.today().isoformat()}",
             f"Working directory: {self.workdir}",
-            f"Model: {MODEL}",
-            f"Platform: {os.uname().sysname}",
+            f"Model: {MODEL}", # 当前使用的模型
+            f"Platform: {os.uname().sysname}", # 当前使用的平台
         ]
-        return "# Dynamic context\n" + "\n".join(lines)
+        return "# Dynamic context\n" + "\n".join(lines) # 将动态上下文拼接成字符串
 
     # -- Assemble all sections --
     def build(self) -> str:
@@ -219,7 +246,7 @@ class SystemPromptBuilder:
         if dynamic:
             sections.append(dynamic)
 
-        return "\n\n".join(sections)
+        return "\n\n".join(sections) # 将所有部分拼接成字符串
 
 
 def build_system_reminder(extra: str = None) -> dict:
@@ -234,8 +261,8 @@ def build_system_reminder(extra: str = None) -> dict:
         parts.append(extra)
     if not parts:
         return None
-    content = "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
-    return {"role": "user", "content": content}
+    content = "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>" # 系统提醒用户消息
+    return {"role": "user", "content": content} # 返回系统提醒用户消息
 
 
 # -- Tool implementations --
@@ -321,7 +348,7 @@ def agent_loop(messages: list):
     prefix is cached and only the dynamic suffix changes per turn.
     """
     while True:
-        system = prompt_builder.build()
+        system = prompt_builder.build() # 构建系统提示词
         response = client.messages.create(
             model=MODEL, system=system, messages=messages,
             tools=TOOLS, max_tokens=8000,
