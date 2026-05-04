@@ -35,6 +35,41 @@ Teaching boundary:
 this file teaches the smallest useful stdio MCP path.
 Marketplace details, auth flows, reconnect logic, and non-tool capability layers
 are intentionally left to bridge docs and later extensions.
+
+中文注解：
+
+s19_mcp_plugin.py - MCP 与插件系统
+
+本章聚焦于最小可用概念：
+外部进程可以暴露工具，经过少量标准化处理后，
+Agent 就可以像使用普通工具一样使用它们。
+
+最简路径：
+  1. 启动一个 MCP 服务进程
+  2. 查询它提供哪些工具
+  3. 给这些工具加前缀并注册
+  4. 将匹配的调用路由到该服务
+
+插件多了一层：发现机制。一个小型 manifest 文件告诉 Agent 要启动哪个外部服务。
+
+关键洞察："外部工具应进入同一个工具管道，而不是形成完全独立的世界。"
+实践中意味着共享权限检查和标准化的 tool_result 载荷。
+
+建议按以下顺序阅读本文件：
+1. CapabilityPermissionGate：外部工具同样经过相同的控制门。
+2. MCPClient：一个服务连接如何暴露工具规格和工具调用。
+3. PluginLoader：manifest 如何声明外部服务。
+4. MCPToolRouter / build_tool_pool：原生工具与外部工具如何合并为一个工具池。
+
+最常见的误解：
+- plugin manifest 不是 MCP 服务
+- MCP 服务不是单个 MCP 工具
+- 外部能力不会绕过原生权限路径
+
+教学边界：
+本文件讲解最小可用的 stdio MCP 路径。
+Marketplace 细节、鉴权流程、断线重连逻辑和非工具能力层
+有意留给桥接文档和后续扩展。
 """
 
 import json
