@@ -70,6 +70,31 @@ Agent 就可以像使用普通工具一样使用它们。
 本文件讲解最小可用的 stdio MCP 路径。
 Marketplace 细节、鉴权流程、断线重连逻辑和非工具能力层
 有意留给桥接文档和后续扩展。
+
+理解：
+启动时
+  ->
+PluginLoader 找到 manifest
+  ->
+得到 server 配置
+  ->
+MCP client 连接 server
+  ->
+list_tools 并标准化名字
+  ->
+和 native tools 一起合并进同一个工具池
+
+运行时
+  ->
+LLM 产出 tool_use
+  ->
+统一权限闸门
+  ->
+native route 或 mcp route
+  ->
+结果标准化
+  ->
+tool_result 回到同一个主循环
 """
 
 import json
@@ -99,15 +124,22 @@ class CapabilityPermissionGate:
     The teaching goal is simple: MCP does not bypass the control plane.
     Native tools and MCP tools both become normalized capability intents first,
     then pass through the same allow / ask policy.
+
+    共享的权限闸门，用于原生工具和外部能力。
+
+    教学目标很简单：MCP 不绕过控制平面。
+    原生工具和 MCP 工具都首先成为标准化能力意图，
+    然后通过相同的允许/询问策略。
     """
 
-    READ_PREFIXES = ("read", "list", "get", "show", "search", "query", "inspect")
-    HIGH_RISK_PREFIXES = ("delete", "remove", "drop", "shutdown")
+    READ_PREFIXES = ("read", "list", "get", "show", "search", "query", "inspect") # 读取能力前缀
+    HIGH_RISK_PREFIXES = ("delete", "remove", "drop", "shutdown") # 高风险能力前缀
 
     def __init__(self, mode: str = "default"):
-        self.mode = mode if mode in PERMISSION_MODES else "default"
+        self.mode = mode if mode in PERMISSION_MODES else "default" # 权限模式
 
     def normalize(self, tool_name: str, tool_input: dict) -> dict:
+        # 判断当前工具调用的风险等级：read、write、high
         if tool_name.startswith("mcp__"):
             _, server_name, actual_tool = tool_name.split("__", 2)
             source = "mcp"
@@ -137,7 +169,7 @@ class CapabilityPermissionGate:
         }
 
     def check(self, tool_name: str, tool_input: dict) -> dict:
-        intent = self.normalize(tool_name, tool_input)
+        intent = self.normalize(tool_name, tool_input) # intent是标准化后的能力意图
 
         if intent["risk"] == "read":
             return {"behavior": "allow", "reason": "Read capability", "intent": intent}
@@ -145,36 +177,36 @@ class CapabilityPermissionGate:
         if self.mode == "auto" and intent["risk"] != "high":
             return {
                 "behavior": "allow",
-                "reason": "Auto mode for non-high-risk capability",
+                "reason": "Auto mode for non-high-risk capability", # 自动模式，非高风险能力
                 "intent": intent,
             }
 
         if intent["risk"] == "high":
             return {
                 "behavior": "ask",
-                "reason": "High-risk capability requires confirmation",
+                "reason": "High-risk capability requires confirmation", # 高风险能力需要确认
                 "intent": intent,
             }
 
         return {
             "behavior": "ask",
-            "reason": "State-changing capability requires confirmation",
+            "reason": "State-changing capability requires confirmation", # 状态改变能力需要确认 
             "intent": intent,
         }
 
     def ask_user(self, intent: dict, tool_input: dict) -> bool:
-        preview = json.dumps(tool_input, ensure_ascii=False)[:200]
+        preview = json.dumps(tool_input, ensure_ascii=False)[:200] # 预览工具输入
         source = (
             f"{intent['source']}:{intent['server']}/{intent['tool']}"
             if intent.get("server")
-            else f"{intent['source']}:{intent['tool']}"
+            else f"{intent['source']}:{intent['tool']}" # 来源：工具名称
         )
-        print(f"\n  [Permission] {source} risk={intent['risk']}: {preview}")
+        print(f"\n  [Permission] {source} risk={intent['risk']}: {preview}") # 打印权限信息
         try:
-            answer = input("  Allow? (y/n): ").strip().lower()
+            answer = input("  Allow? (y/n): ").strip().lower() # 允许/拒绝
         except (EOFError, KeyboardInterrupt):
             return False
-        return answer in ("y", "yes")
+        return answer in ("y", "yes") # 返回是否允许
 
 
 permission_gate = CapabilityPermissionGate()
@@ -186,38 +218,48 @@ class MCPClient:
 
     This is enough to teach the core architecture without dragging readers
     through every transport, auth flow, or marketplace detail up front.
+    
+    基于 stdio 的最简 MCP 客户端。
+    这已经足够讲清楚核心架构，
+    而不需要一开始就让读者面对所有传输协议、鉴权流程或 Marketplace 细节。
+
+    "postgres": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-postgres"]
+        }
+
     """
 
     def __init__(self, server_name: str, command: str, args: list = None, env: dict = None):
-        self.server_name = server_name
-        self.command = command
-        self.args = args or []
+        self.server_name = server_name # mcp 服务名称
+        self.command = command # 启动命令
+        self.args = args or [] # 启动参数
         self.env = {**os.environ, **(env or {})}
-        self.process = None
-        self._request_id = 0
-        self._tools = []  # cached tool list
+        self.process = None # 进程对象
+        self._request_id = 0 # 请求ID
+        self._tools = []  # 缓存工具列表
 
     def connect(self):
         """Start the MCP server process."""
         try:
-            self.process = subprocess.Popen(
-                [self.command] + self.args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=self.env,
-                text=True,
+            self.process = subprocess.Popen(  # 启动一个新的子进程，不等待它结束（异步）
+                [self.command] + self.args, # 要执行的命令，比如 ["python", "my_mcp_server.py"]
+                stdin=subprocess.PIPE, # 父进程可以向子进程写数据（发送请求）
+                stdout=subprocess.PIPE, # 父进程可以从子进程读数据（接收响应）
+                stderr=subprocess.PIPE, # 捕获子进程的错误输出
+                env=self.env, # 给子进程传递环境变量（比如 API Key）
+                text=True, # 以文本模式读写，而不是字节
             )
             # Send initialize request
-            self._send({"method": "initialize", "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "teaching-agent", "version": "1.0"},
+            self._send({"method": "initialize", "params": {  # 发送握手请求，MCP 协议规定的第一条消息
+                "protocolVersion": "2024-11-05",              # 声明客户端使用的协议版本，双方需要对上
+                "capabilities": {},                           # 客户端支持的额外能力，空表示最简实现
+                "clientInfo": {"name": "teaching-agent", "version": "1.0"},  # 客户端自我介绍
             }})
-            response = self._recv()
+            response = self._recv() # 接收握手响应
             if response and "result" in response:
                 # Send initialized notification
-                self._send({"method": "notifications/initialized"})
+                self._send({"method": "notifications/initialized"}) # 发送初始化完成通知，表示握手成功
                 return True
         except FileNotFoundError:
             print(f"[MCP] Server command not found: {self.command}")
@@ -227,10 +269,10 @@ class MCPClient:
 
     def list_tools(self) -> list:
         """Fetch available tools from the server."""
-        self._send({"method": "tools/list", "params": {}})
+        self._send({"method": "tools/list", "params": {}}) # 发送工具列表请求
         response = self._recv()
         if response and "result" in response:
-            self._tools = response["result"].get("tools", [])
+            self._tools = response["result"].get("tools", []) # 提取工具列表
         return self._tools
 
     def call_tool(self, tool_name: str, arguments: dict) -> str:
@@ -238,10 +280,10 @@ class MCPClient:
         self._send({"method": "tools/call", "params": {
             "name": tool_name,
             "arguments": arguments,
-        }})
-        response = self._recv()
+        }}) # 发送工具调用请求
+        response = self._recv() # 接收工具调用响应
         if response and "result" in response:
-            content = response["result"].get("content", [])
+            content = response["result"].get("content", []) # 提取工具调用结果
             return "\n".join(c.get("text", str(c)) for c in content)
         if response and "error" in response:
             return f"MCP Error: {response['error'].get('message', 'unknown')}"
@@ -249,20 +291,24 @@ class MCPClient:
 
     def get_agent_tools(self) -> list:
         """
-        Convert MCP tools to agent tool format.
+        Convert MCP tools to agent tool format. 
 
         Teaching version uses the same simple prefix idea:
+        mcp__{server_name}__{tool_name}
+
+        将 mcp 工具转化为 agent 工具格式。
+        教学版使用相同的简单前缀方案：
         mcp__{server_name}__{tool_name}
         """
         agent_tools = []
         for tool in self._tools:
             prefixed_name = f"mcp__{self.server_name}__{tool['name']}"
             agent_tools.append({
-                "name": prefixed_name,
-                "description": tool.get("description", ""),
-                "input_schema": tool.get("inputSchema", {"type": "object", "properties": {}}),
-                "_mcp_server": self.server_name,
-                "_mcp_tool": tool["name"],
+                "name": prefixed_name, # 添加前缀后的工具名称
+                "description": tool.get("description", ""), # 工具描述
+                "input_schema": tool.get("inputSchema", {"type": "object", "properties": {}}), # 工具输入参数
+                "_mcp_server": self.server_name, # 所属 MCP 服务名称
+                "_mcp_tool": tool["name"], # 原始工具名称
             })
         return agent_tools
 
@@ -270,35 +316,35 @@ class MCPClient:
         """Shut down the server process."""
         if self.process:
             try:
-                self._send({"method": "shutdown"})
-                self.process.terminate()
-                self.process.wait(timeout=5)
+                self._send({"method": "shutdown"}) # 发送关闭请求
+                self.process.terminate() # 发送终止信号，让子进程自行退出
+                self.process.wait(timeout=5) # 等待子进程退出
             except Exception:
-                self.process.kill()
-            self.process = None
+                self.process.kill() # 如果子进程没有退出，则强制杀死
+            self.process = None # 重置进程对象
 
     def _send(self, message: dict):
-        if not self.process or self.process.poll() is not None:
+        if not self.process or self.process.poll() is not None:  # 子进程不存在或已退出则跳过
             return
-        self._request_id += 1
-        envelope = {"jsonrpc": "2.0", "id": self._request_id, **message}
-        line = json.dumps(envelope) + "\n"
+        self._request_id += 1                                    # 每次发送递增请求 ID，用于匹配响应
+        envelope = {"jsonrpc": "2.0", "id": self._request_id, **message}  # 包装成 JSON-RPC 2.0 格式
+        line = json.dumps(envelope) + "\n"                       # 序列化为 JSON 字符串，末尾加换行符作为消息分隔符
         try:
-            self.process.stdin.write(line)
-            self.process.stdin.flush()
-        except (BrokenPipeError, OSError):
+            self.process.stdin.write(line)                       # 写入子进程的标准输入
+            self.process.stdin.flush()                           # 立即刷新缓冲区，确保数据发出去
+        except (BrokenPipeError, OSError):                       # 子进程已关闭管道时静默忽略
             pass
 
     def _recv(self) -> dict | None:
-        if not self.process or self.process.poll() is not None:
+        if not self.process or self.process.poll() is not None:  # 子进程不存在或已退出则返回 None
             return None
         try:
-            line = self.process.stdout.readline()
+            line = self.process.stdout.readline()                # 从子进程标准输出读取一行（阻塞直到有数据）
             if line:
-                return json.loads(line)
-        except (json.JSONDecodeError, OSError):
+                return json.loads(line)                          # 解析 JSON 并返回
+        except (json.JSONDecodeError, OSError):                  # JSON 格式错误或管道异常时静默忽略
             pass
-        return None
+        return None                                              # 读到空行（子进程关闭）时返回 None
 
 
 class PluginLoader:
@@ -307,10 +353,14 @@ class PluginLoader:
 
     Teaching version implements the smallest useful plugin flow:
     read a manifest, discover MCP server configs, and register them.
+    
+    从 .claude-plugin/ 目录加载插件。
+    教学版实现了最小可用的插件流程：
+    读取 manifest 文件，发现 MCP 服务配置，并注册它们。
     """
 
     def __init__(self, search_dirs: list = None):
-        self.search_dirs = search_dirs or [WORKDIR]
+        self.search_dirs = search_dirs or [WORKDIR] # 当前.agents目录
         self.plugins = {}  # name -> manifest
 
     def scan(self) -> list:
@@ -318,7 +368,20 @@ class PluginLoader:
         found = []
         for search_dir in self.search_dirs:
             plugin_dir = Path(search_dir) / ".claude-plugin"
-            manifest_path = plugin_dir / "plugin.json"
+            manifest_path = plugin_dir / "plugin.json" # 插件manifest文件
+            """
+            {
+                "name": "my-db-tools",
+                "version": "1.0.0",
+                "mcpServers": {
+                    "postgres": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-postgres"]
+                    }
+                }
+            }
+            # 整个 json 文件就是一个 manifest，里面定义了插件名、版本、提供哪些 MCP server、每个 server 的启动命令是什么
+            """
             if manifest_path.exists():
                 try:
                     manifest = json.loads(manifest_path.read_text())
@@ -338,7 +401,7 @@ class PluginLoader:
         for plugin_name, manifest in self.plugins.items():
             for server_name, config in manifest.get("mcpServers", {}).items():
                 servers[f"{plugin_name}__{server_name}"] = config
-        return servers
+        return servers # 提取里面的mcp工具名称和配置
 
 
 class MCPToolRouter:
@@ -348,33 +411,39 @@ class MCPToolRouter:
     MCP tools are prefixed mcp__{server}__{tool} and live alongside
     native tools in the same tool pool. The router strips the prefix
     and dispatches to the right MCPClient.
+
+    将工具调用路由到正确的 MCP 服务。
+    MCP 工具的名称格式为 mcp__{server}__{tool}，
+    和 native 工具一样，都放在同一个工具池中。
+    比如 mcp__postgres__query 表示调用 postgres 服务的 query 工具。
+    路由器去掉前缀，分发到正确的 MCPClient。比如 mcp__postgres__query 会被路由到 postgres 服务的 MCPClient。
     """
 
     def __init__(self):
         self.clients = {}  # server_name -> MCPClient
 
     def register_client(self, client: MCPClient):
-        self.clients[client.server_name] = client
+        self.clients[client.server_name] = client # 注册 MCPClient 实例，key 是 server_name，value 是 MCPClient 实例
 
     def is_mcp_tool(self, tool_name: str) -> bool:
         return tool_name.startswith("mcp__")
 
     def call(self, tool_name: str, arguments: dict) -> str:
         """Route an MCP tool call to the correct server."""
-        parts = tool_name.split("__", 2)
-        if len(parts) != 3:
+        parts = tool_name.split("__", 2) # 2表示最多分割成3段，比如 mcp__postgres__query 会被分割成 ["mcp", "postgres", "query"]
+        if len(parts) != 3: # 如果不是3段，则返回错误
             return f"Error: Invalid MCP tool name: {tool_name}"
-        _, server_name, actual_tool = parts
-        client = self.clients.get(server_name)
-        if not client:
-            return f"Error: MCP server not found: {server_name}"
-        return client.call_tool(actual_tool, arguments)
+        _, server_name, actual_tool = parts # 分割后的三段分别是：前缀、服务名称、工具名称
+        client = self.clients.get(server_name) # 根据服务名称获取 MCPClient 实例
+        if not client: # 如果获取不到，则返回错误
+            return f"Error: MCP server not found: {server_name}" # 返回错误信息
+        return client.call_tool(actual_tool, arguments) # 调用工具
 
     def get_all_tools(self) -> list:
         """Collect tools from all connected MCP servers."""
         tools = []
         for client in self.clients.values():
-            tools.extend(client.get_agent_tools())
+            tools.extend(client.get_agent_tools()) # 获取所有转化后的 MCP 工具
         return tools
 
 
@@ -444,8 +513,8 @@ NATIVE_TOOLS = [
 
 
 # -- MCP Tool Router (global) --
-mcp_router = MCPToolRouter()
-plugin_loader = PluginLoader()
+mcp_router = MCPToolRouter() # 将工具路由到指定的服务
+plugin_loader = PluginLoader() # 发现mcp服务
 
 
 def build_tool_pool() -> list:
@@ -456,7 +525,7 @@ def build_tool_pool() -> list:
     predictable even after external tools are added.
     """
     all_tools = list(NATIVE_TOOLS)
-    mcp_tools = mcp_router.get_all_tools()
+    mcp_tools = mcp_router.get_all_tools() # 获取所有 MCP 工具
 
     native_names = {t["name"] for t in all_tools}
     for tool in mcp_tools:
@@ -468,31 +537,31 @@ def build_tool_pool() -> list:
 
 def handle_tool_call(tool_name: str, tool_input: dict) -> str:
     """Dispatch to native handler or MCP router."""
-    if mcp_router.is_mcp_tool(tool_name):
-        return mcp_router.call(tool_name, tool_input)
+    if mcp_router.is_mcp_tool(tool_name): # 判断是否为mcp工具
+        return mcp_router.call(tool_name, tool_input) # 路由到指定的服务
     handler = NATIVE_HANDLERS.get(tool_name)
     if handler:
-        return handler(**tool_input)
-    return f"Unknown tool: {tool_name}"
+        return handler(**tool_input) # 调用本地工具
+    return f"Unknown tool: {tool_name}" # 返回错误信息
 
 
 def normalize_tool_result(tool_name: str, output: str, intent: dict | None = None) -> str:
-    intent = intent or permission_gate.normalize(tool_name, {})
-    status = "error" if "Error:" in output or "MCP Error:" in output else "ok"
+    intent = intent or permission_gate.normalize(tool_name, {}) # 标准化后的能力意图
+    status = "error" if "Error:" in output or "MCP Error:" in output else "ok" # 状态：error或ok
     payload = {
-        "source": intent["source"],
-        "server": intent.get("server"),
-        "tool": intent["tool"],
-        "risk": intent["risk"],
-        "status": status,
-        "preview": output[:500],
+        "source": intent["source"], # 来源：工具名称
+        "server": intent.get("server"), # 所属 MCP 服务名称
+        "tool": intent["tool"], # 原始工具名称
+        "risk": intent["risk"], # 风险等级
+        "status": status, # 状态
+        "preview": output[:500], # 预览结果
     }
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    return json.dumps(payload, indent=2, ensure_ascii=False) # 返回标准化后的结果
 
 
 def agent_loop(messages: list):
     """Agent loop with unified native + MCP tool pool."""
-    tools = build_tool_pool()
+    tools = build_tool_pool() # 构建完整的工具池：原生工具 + MCP 工具
 
     while True:
         system = (
@@ -514,7 +583,7 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            decision = permission_gate.check(block.name, block.input or {})
+            decision = permission_gate.check(block.name, block.input or {}) # 权限网关
             try:
                 if decision["behavior"] == "deny":
                     output = f"Permission denied: {decision['reason']}"
@@ -523,14 +592,14 @@ def agent_loop(messages: list):
                 ):
                     output = f"Permission denied by user: {decision['reason']}"
                 else:
-                    output = handle_tool_call(block.name, block.input or {})
+                    output = handle_tool_call(block.name, block.input or {}) # 执行工具
             except Exception as e:
                 output = f"Error: {e}"
             print(f"> {block.name}: {str(output)[:200]}")
             results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": normalize_tool_result(
+                "content": normalize_tool_result( # 标准化后的结果
                     block.name,
                     str(output),
                     decision.get("intent"),
@@ -550,18 +619,25 @@ def agent_loop(messages: list):
 
 if __name__ == "__main__":
     # Scan for plugins
-    found = plugin_loader.scan()
+    found = plugin_loader.scan() # 扫描当前.agents目录下的.claude-plugin/plugin.json文件
     if found:
         print(f"[Plugins loaded: {', '.join(found)}]")
         for server_name, config in plugin_loader.get_mcp_servers().items():
+            # 遍历插件中的mcp server，创建 MCPClient 实例
+            """
+            "postgres": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-postgres"]
+                }
+            """
             mcp_client = MCPClient(server_name, config.get("command", ""), config.get("args", []))
             if mcp_client.connect():
                 mcp_client.list_tools()
                 mcp_router.register_client(mcp_client)
                 print(f"[MCP] Connected to {server_name}")
 
-    tool_count = len(build_tool_pool())
-    mcp_count = len(mcp_router.get_all_tools())
+    tool_count = len(build_tool_pool()) # 工具数量
+    mcp_count = len(mcp_router.get_all_tools()) # MCP 工具数量
     print(f"[Tool pool: {tool_count} tools ({mcp_count} from MCP)]")
 
     history = []
@@ -598,5 +674,5 @@ if __name__ == "__main__":
         print()
 
     # Cleanup MCP connections
-    for c in mcp_router.clients.values():
-        c.disconnect()
+    for c in mcp_router.clients.values(): # 遍历所有 MCP 客户端
+        c.disconnect() # 关闭 MCP 连接
