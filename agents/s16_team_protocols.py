@@ -130,8 +130,8 @@ WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"] # 模型id
 TEAM_DIR = WORKDIR / ".team"  # 团队成员目录
-INBOX_DIR = TEAM_DIR / "inbox" # 成员各自的收件箱目录
-REQUESTS_DIR = TEAM_DIR / "requests" # 成员之间通信的请求记录目录
+INBOX_DIR = TEAM_DIR / "inbox" # 成员各自的收件箱目录，读取以后就没有了
+REQUESTS_DIR = TEAM_DIR / "requests" # 成员之间通信的请求记录目录，读取以后还在
 
 SYSTEM = f"You are a team lead at {WORKDIR}. Manage teammates with shutdown and plan approval protocols."
 

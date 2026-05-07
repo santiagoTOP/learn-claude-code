@@ -309,7 +309,7 @@ class WorktreeManager:
     def _check_git(self) -> bool:
         try:
             r = subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
+                ["git", "rev-parse", "--is-inside-work-tree"], # 判断当前工作目录是否是 git 仓库的根目录
                 cwd=self.repo_root, capture_output=True, text=True, timeout=10,
             )
             return r.returncode == 0
@@ -425,7 +425,7 @@ class WorktreeManager:
         self.events.emit("worktree.enter", task_id=wt.get("task_id"), wt_name=name, path=str(path))
         return json.dumps(updated, indent=2) # 返回更新后的worktree
 
-    def run(self, name: str, command: str) -> str:
+    def run(self, name: str, command: str) -> str: # 模型本身是知道任务的，因此这里只是进入指定的工作环境，然后执行命令
         dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
         if any(d in command for d in dangerous):
             return "Error: Dangerous command blocked"
