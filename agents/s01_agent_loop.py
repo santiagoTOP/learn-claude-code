@@ -39,8 +39,8 @@ Message(
     ], 
     model='glm-4.7', 
     role='assistant', 
-    stop_details=None, s
-    top_reason='tool_use', 
+    stop_details=None, 
+    stop_reason='tool_use', 
     stop_sequence=None, 
     type='message', 
     usage=Usage(
